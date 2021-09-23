@@ -1,6 +1,7 @@
 package vegeta
 
 import (
+	"math"
 	"strconv"
 	"time"
 
@@ -100,15 +101,21 @@ func (m *Metrics) Merge(nm *Metrics) {
 	}
 	m.BytesIn.Total += nm.BytesIn.Total
 	m.BytesOut.Total += nm.BytesOut.Total
-	if len(nm.Latencies.Centroids) > 0 {
-		m.Latencies.estimator.(tdigestMerger).MergeCentroids(nm.Latencies.Centroids)
-	}
 
-	m.Earliest = minTime(m.Earliest, nm.Earliest)
+	m.Earliest = minNonzeroTime(m.Earliest, nm.Earliest)
 	m.Latest = maxTime(m.Latest, nm.Latest)
 	m.End = maxTime(m.End, nm.End)
 	m.success += uint64(nm.Throughput * (nm.Duration + nm.Wait).Seconds())
+
+	m.Latencies.init()
 	m.Latencies.Total += nm.Latencies.Total
+	if m.Latencies.Min == 0 || (nm.Latencies.Min < m.Latencies.Min && nm.Latencies.Min > 0) {
+		m.Latencies.Min = nm.Latencies.Min
+	}
+	m.Latencies.Max = time.Duration(math.Max(float64(m.Latencies.Max), float64(nm.Latencies.Max)))
+	if len(nm.Latencies.Centroids) > 0 {
+		m.Latencies.estimator.(tdigestMerger).MergeCentroids(nm.Latencies.Centroids)
+	}
 	if !m.discardErrors {
 		for _, e := range nm.Errors {
 			if _, ok := m.errors[e]; !ok {
@@ -147,6 +154,9 @@ func (m *Metrics) Close() {
 	m.Latencies.P90 = m.Latencies.Quantile(0.90)
 	m.Latencies.P95 = m.Latencies.Quantile(0.95)
 	m.Latencies.P99 = m.Latencies.Quantile(0.99)
+	if m.Latencies.reportCentroids {
+		m.Latencies.Centroids = m.Latencies.getCentroids(nil)
+	}
 }
 
 // ReportCentroids toggles whether or not we should report the centroids from the underlying t-digest
@@ -208,9 +218,6 @@ func (l *LatencyMetrics) Add(latency time.Duration) {
 		l.Min = latency
 	}
 	l.estimator.Add(float64(latency))
-	if l.reportCentroids {
-		l.Centroids = l.getCentroids()
-	}
 }
 
 // Quantile returns the nth quantile from the latency summary.
@@ -223,9 +230,9 @@ func (l *LatencyMetrics) setReportCentroids(b bool) {
 	l.reportCentroids = b
 }
 
-func (l *LatencyMetrics) getCentroids() tdigest.CentroidList {
+func (l *LatencyMetrics) getCentroids(cl tdigest.CentroidList) tdigest.CentroidList {
 	if td, ok := l.estimator.(tdigestExporter); ok {
-		return td.GetCentroids()
+		return td.GetCentroids(cl)
 	}
 	return nil
 }
@@ -252,7 +259,7 @@ type estimator interface {
 }
 
 type tdigestExporter interface {
-	GetCentroids() tdigest.CentroidList
+	GetCentroids(cl tdigest.CentroidList) tdigest.CentroidList
 }
 
 type tdigestMerger interface {
@@ -269,8 +276,8 @@ func (e *tdigestEstimator) Add(s float64) { e.TDigest.Add(s, 1) }
 func (e *tdigestEstimator) Get(q float64) float64 {
 	return e.TDigest.Quantile(q)
 }
-func (e *tdigestEstimator) GetCentroids() tdigest.CentroidList {
-	return e.Centroids()
+func (e *tdigestEstimator) GetCentroids(cl tdigest.CentroidList) tdigest.CentroidList {
+	return e.Centroids(cl)
 }
 func (e *tdigestEstimator) MergeCentroids(c tdigest.CentroidList) {
 	e.AddCentroidList(c)
